@@ -76,13 +76,13 @@
   <main id="view"></main>
   <footer>
     Tour data (driver name, times, counts, GPS position) is stored in your Firebase database. Drivers' positions are shared with the admin dashboard while a tour is running.
+    <span id="ver"></span>
   </footer>
 </div>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/js-sha256/0.11.0/sha256.min.js"></script>
 <script>
 /* =====================================================================
    1) PASTE YOUR FIREBASE CONFIG HERE
@@ -100,19 +100,14 @@ const firebaseConfig = {
 };
 
 /* =====================================================================
-   2) ADMIN LOGIN (stored as SHA-256 hashes, not readable as plain text)
-   Username: amdin   (also accepts: admin)   ·   Password: MH_32rdtg4sda
-   Username is not case-sensitive; spaces around either field are ignored.
-   To change the password: open the browser console on this page, run
-       sha256('yourNewPassword')
-   and paste the result into ADMIN_PASS_HASH below.
+   2) ADMIN LOGIN — edit these two lines to change the credentials.
+   Username is not case-sensitive ("admin" also works); spaces around
+   either field are ignored. The password IS case-sensitive.
    ===================================================================== */
-const ADMIN_USER_HASHES = [
-  "1267057f1ec769c39b88211c4c666382a7dc9fe22f765a66a37918a6a6ab581a", /* amdin */
-  "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918"  /* admin */
-];
-const ADMIN_PASS_HASH = "18f38a2c2480a0035c91ef24f16896dddde18b68bddcffb81971dd809a518aba";
+const ADMIN_USERS = ["amdin", "admin"];
+const ADMIN_PASSWORD = "MH_32rdtg4sda";
 /* ===================================================================== */
+const APP_VERSION = "v5";
 
 const configured = !firebaseConfig.apiKey.startsWith("PASTE");
 let db = null;
@@ -254,14 +249,10 @@ function resetDriver(){ tour=null; phase="login"; stopGps(); render(); }
 
 /* ------------ admin auth ------------ */
 function tryLogin(){
-  try{
-    const u = sha256($("pw-user").value.trim().toLowerCase());
-    const p = sha256($("pw-input").value.trim());
-    if(ADMIN_USER_HASHES.includes(u) && p === ADMIN_PASS_HASH){ adminAuthed = true; render(); }
-    else $("pw-err").textContent = "Wrong username or password.";
-  }catch(e){
-    $("pw-err").textContent = "Login error: " + e.message;
-  }
+  const u = $("pw-user").value.trim().toLowerCase();
+  const p = $("pw-input").value.trim();
+  if(ADMIN_USERS.includes(u) && p === ADMIN_PASSWORD){ adminAuthed = true; render(); }
+  else $("pw-err").textContent = "Wrong username or password. Username: amdin (or admin). Check capital letters in the password.";
 }
 function logout(){ adminAuthed = false; destroyMap(); render(); }
 function saveEmail(){ const v=$("cfg-email").value.trim(); dispatchEmail=v; if(db) db.ref("config/email").set(v); }
@@ -493,6 +484,7 @@ function updateAdminData(){
     <div style="margin-top:8px">${finished.length?finished.map(row).join(""):'<div class="muted">No finished tours yet.</div>'}</div>`;
 }
 
+document.getElementById("ver").textContent = " · App version: " + APP_VERSION;
 render();
 </script>
 </body>
