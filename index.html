@@ -30,7 +30,6 @@
   .bigbtn:active{transform:scale(.97)}
   .bigbtn .l{font-family:'Barlow Condensed',sans-serif;font-size:22px;font-weight:700;text-transform:uppercase;letter-spacing:.02em}
   .bigbtn .s{font-size:13px;opacity:.85;margin-top:2px}
-  .bigbtn:disabled{background:var(--line)!important;cursor:default}
   .stamp{width:230px;height:230px;border-radius:50%;margin:6px auto;display:block;background:var(--amber);
     border:6px solid var(--amber-dark);cursor:pointer;box-shadow:0 6px 0 var(--amber-dark);color:var(--ink);font-family:inherit}
   .stamp:active{transform:scale(.96)}
@@ -50,9 +49,12 @@
   .tourhead{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px}
   .status-live{color:var(--green);font-weight:600}
   .status-bad{color:var(--red);font-weight:600}
+  .gpsbox{background:#F4F6F8;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:13px;line-height:1.6;margin-top:12px}
   #map{height:340px;border-radius:14px;border:1px solid var(--line);margin-bottom:14px;z-index:0}
   .drv-label{background:var(--ink);color:#fff;border:none;border-radius:8px;padding:3px 8px;font-weight:600;font-size:12px;font-family:'IBM Plex Sans',sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.25)}
-  .drv-label::before{border-top-color:var(--ink)}
+  .kv{display:grid;grid-template-columns:110px 1fr;gap:2px 10px;font-size:14px;margin-top:8px}
+  .kv b{font-weight:600}
+  .kv span:nth-child(odd){color:var(--gray)}
   footer{margin-top:26px;font-size:12px;color:var(--gray);line-height:1.5}
   @media(prefers-reduced-motion:reduce){.bigbtn:active,.stamp:active{transform:none}}
 </style>
@@ -68,7 +70,7 @@
   </header>
   <div id="setup-warning" class="warn" style="display:none">
     <b>Setup needed:</b> Firebase is not configured yet, so data can't be shared between phones.
-    Open <code>index.html</code>, find <code>firebaseConfig</code> near the top of the script, and paste in your own Firebase project keys.
+    Open <code>index.html</code>, find <code>firebaseConfig</code> near the top of the script, and paste in your Firebase project keys.
   </div>
   <main id="view"></main>
   <footer>
@@ -94,6 +96,17 @@ const firebaseConfig = {
   messagingSenderId: "0000000000",
   appId: "PASTE_YOUR_APP_ID"
 };
+
+/* =====================================================================
+   2) ADMIN LOGIN
+   Stored as SHA-256 hashes so the values aren't readable in this file.
+   Current login → username: amdin   password: MH_32rdtg4sda
+   To change them: open the browser console on this page and run
+     sha256('yournewpassword').then(console.log)
+   then paste the printed hash below.
+   ===================================================================== */
+const ADMIN_USER_HASH = "1267057f1ec769c39b88211c4c666382a7dc9fe22f765a66a37918a6a6ab581a";
+const ADMIN_PASS_HASH = "18f38a2c2480a0035c91ef24f16896dddde18b68bddcffb81971dd809a518aba";
 /* ===================================================================== */
 
 const configured = !firebaseConfig.apiKey.startsWith("PASTE");
@@ -103,21 +116,24 @@ else { document.getElementById("setup-warning").style.display = "block"; }
 
 /* ------------ state ------------ */
 let tab = "driver";
-let phase = "login";            // driver: login | active | finish | done
+let phase = "login";            /* driver flow: login | active | finish | done */
 let tour = null;
 let allTours = {};
 let dispatchEmail = "";
-let adminHash = null;           // null = still loading, "" = not set yet
 let adminAuthed = false;
-let gpsStatus = "off";
-let lastPos = null;
-let watchId = null, pushTimer = null;
+let gpsStatus = "off";          /* off | on | denied */
+let lastPos = null;             /* {lat,lng,acc,at} */
+let lastSentAt = 0;             /* ms timestamp of last DB write of position */
+let watchId = null, fallbackTimer = null, wakeLock = null;
 let map = null, markers = {};
+
+const MIN_PUSH_MS = 20000;      /* send position to DB at most every 20 s */
 
 /* ------------ helpers ------------ */
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtTime = iso => iso ? new Date(iso).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : "—";
+const fmtTimeS = iso => iso ? new Date(iso).toLocaleTimeString() : "—";
 const fmtDate = iso => iso ? new Date(iso).toLocaleDateString() : "—";
 function duration(a,b){
   if(!a) return "—";
@@ -129,6 +145,8 @@ async function sha256(s){
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
   return [...new Uint8Array(buf)].map(x=>x.toString(16).padStart(2,"0")).join("");
 }
+window.sha256 = sha256; /* so credentials can be changed via the console helper above */
+
 function report(t){
   return ["DELIVERY TOUR REPORT","",
     "Driver: "+t.driver, "Date: "+fmtDate(t.startTime),
@@ -153,35 +171,58 @@ if(db){
     dispatchEmail = snap.val() || "";
     const el = $("cfg-email"); if(el && document.activeElement !== el) el.value = dispatchEmail;
   });
-  db.ref("config/adminHash").on("value", snap => {
-    const prev = adminHash;
-    adminHash = snap.val() || "";
-    if(tab==="admin" && !adminAuthed && prev !== adminHash) render();
-  });
-} else { adminHash = ""; }
+}
 
-/* ------------ GPS (driver) ------------ */
+/* ------------ GPS (driver) — rewritten for reliability ------------ */
+function onFix(p){
+  lastPos = { lat:p.coords.latitude, lng:p.coords.longitude,
+              acc:Math.round(p.coords.accuracy||0), at:new Date().toISOString() };
+  if(gpsStatus!=="on"){ gpsStatus="on"; }
+  /* send immediately on first fix, then throttle */
+  if(Date.now() - lastSentAt >= MIN_PUSH_MS) pushPos();
+  refreshGpsBox();
+}
+function onFixError(e){
+  if(e && e.code === 1) gpsStatus = "denied"; /* permission refused */
+  else if(gpsStatus !== "on") gpsStatus = "off";
+  refreshGpsBox();
+}
 function startGps(){
-  if(!navigator.geolocation){ gpsStatus="denied"; return; }
-  watchId = navigator.geolocation.watchPosition(
-    p => { lastPos={lat:p.coords.latitude,lng:p.coords.longitude,at:new Date().toISOString()};
-           if(gpsStatus!=="on"){ gpsStatus="on"; refreshGpsBadge(); } },
-    () => { gpsStatus="denied"; refreshGpsBadge(); },
-    { enableHighAccuracy:true, maximumAge:15000, timeout:20000 }
-  );
-  pushTimer = setInterval(pushPos, 45000);
+  if(!navigator.geolocation){ gpsStatus="denied"; refreshGpsBox(); return; }
+  gpsStatus = "starting";
+  /* kick off with an immediate one-shot fix — much faster first position */
+  navigator.geolocation.getCurrentPosition(onFix, onFixError, { enableHighAccuracy:true, timeout:15000, maximumAge:5000 });
+  watchId = navigator.geolocation.watchPosition(onFix, onFixError, { enableHighAccuracy:true, maximumAge:5000, timeout:20000 });
+  /* fallback: some phones stop firing watchPosition when standing still — poll every 45 s */
+  fallbackTimer = setInterval(() => {
+    navigator.geolocation.getCurrentPosition(onFix, ()=>{}, { enableHighAccuracy:true, timeout:15000, maximumAge:30000 });
+  }, 45000);
+  keepAwake();
 }
 function stopGps(){
   if(watchId!=null){ navigator.geolocation.clearWatch(watchId); watchId=null; }
-  if(pushTimer){ clearInterval(pushTimer); pushTimer=null; }
+  if(fallbackTimer){ clearInterval(fallbackTimer); fallbackTimer=null; }
+  if(wakeLock){ try{ wakeLock.release(); }catch(e){} wakeLock=null; }
   gpsStatus="off";
 }
+async function keepAwake(){
+  /* keeps the phone screen on during the tour — browsers pause GPS when the screen locks */
+  try{ if("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen"); }catch(e){}
+}
+document.addEventListener("visibilitychange", () => {
+  if(document.visibilityState==="visible" && tour && tour.status==="active"){
+    keepAwake();
+    navigator.geolocation && navigator.geolocation.getCurrentPosition(onFix, ()=>{}, { enableHighAccuracy:true, timeout:15000, maximumAge:0 });
+  }
+});
 function pushPos(){
-  if(!tour || !lastPos) return;
-  tour.lastLat=lastPos.lat; tour.lastLng=lastPos.lng; tour.lastGpsAt=lastPos.at;
-  tour.trail=(tour.trail||[]).concat([lastPos]).slice(-50);
+  if(!tour || tour.status!=="active" || !lastPos) return;
+  tour.lastLat=lastPos.lat; tour.lastLng=lastPos.lng; tour.lastGpsAt=lastPos.at; tour.lastAcc=lastPos.acc;
+  tour.trail=(tour.trail||[]).concat([{lat:lastPos.lat,lng:lastPos.lng,at:lastPos.at}]).slice(-60);
   tour.updatedAt=new Date().toISOString();
+  lastSentAt = Date.now();
   saveTour(tour);
+  refreshGpsBox();
 }
 
 /* ------------ driver actions ------------ */
@@ -191,17 +232,17 @@ async function startTour(){
   if(db){
     const snap = await db.ref("tours").orderByChild("status").equalTo("active").get();
     const existing = Object.values(snap.val()||{}).find(t=>t.driver.toLowerCase()===name.toLowerCase());
-    if(existing){ tour=existing; phase="active"; startGps(); render(); return; }
+    if(existing){ tour=existing; phase="active"; render(); startGps(); return; }
   }
   const now = new Date();
   tour = { id: now.getTime()+"_"+slug(name), driver:name, startTime:now.toISOString(),
            endTime:null, delivered:0, returned:null, status:"active", trail:[], updatedAt:now.toISOString() };
-  saveTour(tour); phase="active"; startGps(); render();
+  saveTour(tour); phase="active"; render(); startGps();
 }
 function bump(d){
   if(!tour) return;
   tour.delivered = Math.max(0, tour.delivered+d);
-  if(lastPos){ tour.lastLat=lastPos.lat; tour.lastLng=lastPos.lng; tour.lastGpsAt=lastPos.at; }
+  if(lastPos){ tour.lastLat=lastPos.lat; tour.lastLng=lastPos.lng; tour.lastGpsAt=lastPos.at; tour.lastAcc=lastPos.acc; lastSentAt=Date.now(); }
   tour.updatedAt = new Date().toISOString();
   saveTour(tour); render();
 }
@@ -215,18 +256,11 @@ function finishTour(){
 function resetDriver(){ tour=null; phase="login"; stopGps(); render(); }
 
 /* ------------ admin auth ------------ */
-async function createAdminPass(){
-  const a = $("pw-new").value, b = $("pw-confirm").value;
-  if(a.length < 6){ $("pw-err").textContent = "Password must be at least 6 characters."; return; }
-  if(a !== b){ $("pw-err").textContent = "Passwords don't match."; return; }
-  const h = await sha256(a);
-  if(db) await db.ref("config/adminHash").set(h);
-  adminHash = h; adminAuthed = true; render();
-}
 async function tryLogin(){
-  const h = await sha256($("pw-input").value);
-  if(h === adminHash){ adminAuthed = true; render(); }
-  else $("pw-err").textContent = "Wrong password.";
+  const u = await sha256($("pw-user").value.trim());
+  const p = await sha256($("pw-input").value);
+  if(u === ADMIN_USER_HASH && p === ADMIN_PASS_HASH){ adminAuthed = true; render(); }
+  else $("pw-err").textContent = "Wrong username or password.";
 }
 function logout(){ adminAuthed = false; destroyMap(); render(); }
 function saveEmail(){ const v=$("cfg-email").value.trim(); dispatchEmail=v; if(db) db.ref("config/email").set(v); }
@@ -238,13 +272,13 @@ function initMap(){
   map = L.map("map", { zoomControl:true });
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
     { attribution:'&copy; OpenStreetMap contributors', maxZoom:19 }).addTo(map);
-  map.setView([52.37, 4.90], 8); /* fallback view until first GPS point arrives */
+  map.setView([52.37, 4.90], 8);
+  map.on("dragstart zoomstart", ()=>{ map._userMoved = true; });
 }
 function updateMarkers(){
   if(!map) return;
   const active = Object.values(allTours).filter(t => t.status==="active");
-  const seen = {};
-  const pts = [];
+  const seen = {}, pts = [];
   active.forEach(t => {
     if(t.lastLat == null) return;
     seen[t.id] = true;
@@ -282,47 +316,43 @@ function setTab(t){
   if(t!=="admin") destroyMap();
   render();
 }
-function refreshGpsBadge(){ const el=$("gps-el"); if(el) el.outerHTML=gpsHtml(); }
-function gpsHtml(){
+function refreshGpsBox(){
+  const el = $("gps-box"); if(el) el.innerHTML = gpsBoxHtml();
+  const badge = $("gps-el"); if(badge) badge.outerHTML = gpsBadge();
+}
+function gpsBadge(){
   const cls = gpsStatus==="on"?"status-live":"status-bad";
   const txt = gpsStatus==="on"?"live":(gpsStatus==="denied"?"blocked":"starting…");
   return '<span id="gps-el" class="'+cls+'">'+txt+'</span>';
+}
+function gpsBoxHtml(){
+  if(gpsStatus==="denied") return `<b style="color:var(--red)">Location is blocked.</b>
+    Allow location for this website in your phone settings (Settings → browser → Location → Allow), then reload this page and enter your name again.`;
+  if(!lastPos) return `Getting your position… make sure location is allowed for this website.`;
+  return `Position: ${lastPos.lat.toFixed(5)}, ${lastPos.lng.toFixed(5)} (±${lastPos.acc} m)<br>
+    Last sent to dispatch: <b>${lastSentAt ? new Date(lastSentAt).toLocaleTimeString() : "—"}</b><br>
+    <span class="muted">Keep this page open while driving — tracking pauses if the browser is closed. The screen is kept awake automatically.</span>`;
 }
 
 function render(){
   const v = $("view");
   if(tab==="driver"){ v.innerHTML = renderDriver(); return; }
-  /* admin tab */
-  if(adminHash === null){ v.innerHTML = '<div class="card muted">Loading…</div>'; return; }
   if(!adminAuthed){
-    v.innerHTML = adminHash === "" ? renderCreatePass() : renderLogin();
-    const inp = $("pw-input") || $("pw-new"); if(inp) inp.focus();
+    v.innerHTML = renderLogin();
+    const inp = $("pw-user"); if(inp) inp.focus();
     return;
   }
   v.innerHTML = renderAdminShell();
   initMap();
-  map.on("dragstart zoomstart", ()=>{ map._userMoved = true; });
   updateAdminData();
 }
 
-function renderCreatePass(){
-  return `<div class="card">
-    <div class="eyebrow">Admin portal — first-time setup</div>
-    <h2 class="display">Create admin password</h2>
-    <p class="muted">This password protects the dashboard. It will be required every time the Admin tab is opened.</p>
-    <input id="pw-new" type="password" placeholder="New password (min 6 characters)" style="margin-bottom:10px" />
-    <input id="pw-confirm" type="password" placeholder="Repeat password" style="margin-bottom:10px"
-      onkeydown="if(event.key==='Enter')createAdminPass()" />
-    <div id="pw-err" class="err"></div>
-    <button class="bigbtn" style="background:var(--ink)" onclick="createAdminPass()">
-      <div class="l">Set password &amp; open portal</div></button>
-  </div>`;
-}
 function renderLogin(){
   return `<div class="card">
     <div class="eyebrow">Admin portal</div>
-    <h2 class="display">Enter password</h2>
-    <input id="pw-input" type="password" placeholder="Admin password" style="margin-bottom:10px"
+    <h2 class="display">Log in</h2>
+    <input id="pw-user" placeholder="Username" autocomplete="username" style="margin-bottom:10px" />
+    <input id="pw-input" type="password" placeholder="Password" autocomplete="current-password" style="margin-bottom:10px"
       onkeydown="if(event.key==='Enter')tryLogin()" />
     <div id="pw-err" class="err"></div>
     <button class="bigbtn" style="background:var(--ink)" onclick="tryLogin()"><div class="l">Log in</div></button>
@@ -345,8 +375,9 @@ function renderDriver(){
     <div class="card">
       <div class="tourhead">
         <div><div class="eyebrow">On tour</div><div class="display" style="font-size:26px;font-weight:700">${esc(tour.driver)}</div></div>
-        <div class="muted" style="text-align:right">Started ${fmtTime(tour.startTime)}<br>${duration(tour.startTime)} on the road<br>GPS: ${gpsHtml()}</div>
+        <div class="muted" style="text-align:right">Started ${fmtTime(tour.startTime)}<br>${duration(tour.startTime)} on the road<br>GPS: ${gpsBadge()}</div>
       </div>
+      <div id="gps-box" class="gpsbox">${gpsBoxHtml()}</div>
     </div>
     <button class="stamp" onclick="bump(1)" aria-label="Mark one packet delivered">
       <div class="n">${tour.delivered}</div><div class="t">Delivered · tap +1</div>
@@ -417,17 +448,23 @@ function updateAdminData(){
   const finished = tours.filter(t=>t.status==="finished");
   const row = t => {
     const stale = t.lastGpsAt && (Date.now()-new Date(t.lastGpsAt) > 5*60000);
+    const loc = t.lastLat!=null
+      ? `<a href="https://maps.google.com/?q=${t.lastLat},${t.lastLng}" target="_blank"><b>${t.lastLat.toFixed(5)}, ${t.lastLng.toFixed(5)} ↗</b></a>
+         <span class="${stale?'status-bad':'muted'}"> · updated ${fmtTime(t.lastGpsAt)}${stale?" (stale)":""}</span>`
+      : `<span class="muted">no GPS signal yet</span>`;
     return `<div class="card">
       <div class="display" style="font-size:22px;font-weight:700">${esc(t.driver)}
         <span style="font-size:13px;letter-spacing:.08em" class="${t.status==="active"?"status-live":"muted"}">${t.status==="active"?"● on tour":"finished"}</span>
       </div>
-      <div class="muted">${fmtDate(t.startTime)} · ${fmtTime(t.startTime)} → ${fmtTime(t.endTime)} · ${duration(t.startTime,t.endTime)}</div>
-      <div style="font-size:15px;margin-top:6px">Delivered <b>${t.delivered}</b>${t.returned!=null?` · Returned <b>${t.returned}</b>`:""}</div>
-      ${t.lastLat!=null
-        ? `<div style="font-size:13px;margin-top:6px"><a href="https://maps.google.com/?q=${t.lastLat},${t.lastLng}" target="_blank"><b>Open in Google Maps ↗</b></a>
-           <span class="${stale?'status-bad':'muted'}">· GPS ${fmtTime(t.lastGpsAt)}${stale?" (stale)":""}</span></div>`
-        : `<div class="muted" style="margin-top:6px">No GPS signal received yet.</div>`}
-      ${t.status==="finished" ? `<a href="${mailtoFor(t)}" style="display:inline-block;margin-top:8px;font-weight:600;color:var(--green)">Email this report ↗</a>`:""}
+      <div class="kv">
+        <span>Started</span><b>${fmtTime(t.startTime)} (${fmtDate(t.startTime)})</b>
+        <span>Finished</span><b>${t.endTime?fmtTime(t.endTime):"— still driving"}</b>
+        <span>Duration</span><b>${duration(t.startTime,t.endTime)}</b>
+        <span>Delivered</span><b>${t.delivered} packets</b>
+        <span>Returned</span><b>${t.returned!=null?t.returned+" packets":"—"}</b>
+        <span>Location</span><span>${loc}</span>
+      </div>
+      ${t.status==="finished" ? `<a href="${mailtoFor(t)}" style="display:inline-block;margin-top:10px;font-weight:600;color:var(--green)">Email this report ↗</a>`:""}
     </div>`;
   };
   box.innerHTML = `
