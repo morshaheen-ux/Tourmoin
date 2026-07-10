@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Tour Tracker</title>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --ink:#1A2233; --panel:#fff; --bg:#EDF0F3; --amber:#F5A300; --amber-dark:#C98600;
+    --green:#2E9E6B; --red:#D64545; --gray:#8A93A3; --line:#D8DDE4;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:'IBM Plex Sans',system-ui,sans-serif}
+  .display{font-family:'Barlow Condensed',sans-serif;letter-spacing:.02em;text-transform:uppercase}
+  .wrap{max-width:560px;margin:0 auto;padding:18px 14px 40px}
+  header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:10px}
+  .logo{font-size:24px;font-weight:700;letter-spacing:.06em}
+  .logo b{background:var(--amber);padding:2px 8px;border-radius:6px;margin-right:8px}
+  nav{display:flex;gap:6px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:4px}
+  nav button{padding:8px 14px;border-radius:8px;border:none;cursor:pointer;background:transparent;color:var(--ink);font-weight:600;font-size:14px;font-family:inherit}
+  nav button.on{background:var(--ink);color:#fff}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:14px}
+  .eyebrow{font-family:'Barlow Condensed',sans-serif;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.14em;color:var(--gray)}
+  h2{font-size:32px;margin:6px 0 4px}
+  .muted{font-size:14px;color:var(--gray)}
+  input{width:100%;padding:14px;font-size:17px;border-radius:10px;border:1.5px solid var(--line);font-family:inherit}
+  .bigbtn{width:100%;padding:16px 18px;border-radius:12px;border:none;cursor:pointer;text-align:center;color:#fff;font-family:inherit}
+  .bigbtn:active{transform:scale(.97)}
+  .bigbtn .l{font-family:'Barlow Condensed',sans-serif;font-size:22px;font-weight:700;text-transform:uppercase;letter-spacing:.02em}
+  .bigbtn .s{font-size:13px;opacity:.85;margin-top:2px}
+  .bigbtn:disabled{background:var(--line)!important;cursor:default}
+  .stamp{width:230px;height:230px;border-radius:50%;margin:6px auto;display:block;background:var(--amber);
+    border:6px solid var(--amber-dark);cursor:pointer;box-shadow:0 6px 0 var(--amber-dark);color:var(--ink);font-family:inherit}
+  .stamp:active{transform:scale(.96)}
+  .stamp .n{font-family:'Barlow Condensed',sans-serif;font-size:64px;font-weight:700;line-height:1}
+  .stamp .t{font-family:'Barlow Condensed',sans-serif;font-size:18px;font-weight:600;text-transform:uppercase;letter-spacing:.1em;margin-top:4px}
+  .linkbtn{background:none;border:none;color:var(--gray);font-size:14px;cursor:pointer;text-decoration:underline;display:block;margin:10px auto;font-family:inherit}
+  .row{display:flex;gap:10px}
+  .ghost{flex:1;padding:14px;border-radius:12px;border:1.5px solid var(--line);background:#fff;cursor:pointer;font-size:15px;font-family:inherit}
+  table{width:100%;font-size:15px;border-collapse:collapse;margin:10px 0 16px}
+  td{padding:8px 0;border-bottom:1px solid var(--line)}
+  td:last-child{text-align:right;font-weight:600}
+  td:first-child{color:var(--gray)}
+  a{color:var(--ink)}
+  .warn{background:#FFF6E0;border:1.5px solid var(--amber);border-radius:12px;padding:14px;font-size:14px;line-height:1.5;margin-bottom:14px}
+  .tourhead{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px}
+  .status-live{color:var(--green);font-weight:600}
+  .status-bad{color:var(--red);font-weight:600}
+  footer{margin-top:26px;font-size:12px;color:var(--gray);line-height:1.5}
+  @media(prefers-reduced-motion:reduce){.bigbtn:active,.stamp:active{transform:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo display"><b>▮▮</b>Tour Tracker</div>
+    <nav>
+      <button id="tab-driver" class="on" onclick="setTab('driver')">Driver</button>
+      <button id="tab-dash" onclick="setTab('dash')">Dashboard</button>
+    </nav>
+  </header>
+  <div id="setup-warning" class="warn" style="display:none">
+    <b>Setup needed:</b> Firebase is not configured yet, so data can't be shared between phones.
+    Open <code>index.html</code>, find <code>firebaseConfig</code> near the top of the script, and paste in your own Firebase project keys (instructions in the chat where you got this file).
+  </div>
+  <main id="view"></main>
+  <footer>
+    Tour data (driver name, times, counts, GPS position) is stored in your Firebase database and visible on the dashboard to anyone who has this page's link.
+  </footer>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script>
+/* =====================================================================
+   1) PASTE YOUR FIREBASE CONFIG HERE
+   Get it free at https://console.firebase.google.com
+   (Create project → add a Web app → copy the config object)
+   Then in the console: Build → Realtime Database → Create database
+   → start in TEST mode (you can tighten rules later).
+   ===================================================================== */
+const firebaseConfig = {
+  apiKey: "PASTE_YOUR_API_KEY",
+  authDomain: "PASTE_YOUR_PROJECT.firebaseapp.com",
+  databaseURL: "https://PASTE_YOUR_PROJECT-default-rtdb.firebaseio.com",
+  projectId: "PASTE_YOUR_PROJECT",
+  storageBucket: "PASTE_YOUR_PROJECT.appspot.com",
+  messagingSenderId: "0000000000",
+  appId: "PASTE_YOUR_APP_ID"
+};
+/* ===================================================================== */
+
+const configured = !firebaseConfig.apiKey.startsWith("PASTE");
+let db = null;
+if (configured) {
+  firebase.initializeApp(firebaseConfig);
+  db = firebase.database();
+} else {
+  document.getElementById("setup-warning").style.display = "block";
+}
+
+/* ------------ state ------------ */
+let tab = "driver";
+let phase = "login";              // login | active | finish | done
+let tour = null;                  // current driver's tour
+let allTours = {};                // dashboard data
+let dispatchEmail = "";
+let gpsStatus = "off";
+let lastPos = null;
+let watchId = null, pushTimer = null;
+
+/* ------------ helpers ------------ */
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtTime = iso => iso ? new Date(iso).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : "—";
+const fmtDate = iso => iso ? new Date(iso).toLocaleDateString() : "—";
+function duration(a, b){
+  if(!a) return "—";
+  const mins = Math.max(0, Math.round(((b?new Date(b):new Date()) - new Date(a))/60000));
+  return Math.floor(mins/60)+"h "+String(mins%60).padStart(2,"0")+"m";
+}
+const slug = s => s.trim().toLowerCase().replace(/[^a-z0-9]+/g,"-").slice(0,24) || "driver";
+
+function report(t){
+  return ["DELIVERY TOUR REPORT","",
+    "Driver: "+t.driver,
+    "Date: "+fmtDate(t.startTime),
+    "Tour started: "+fmtTime(t.startTime),
+    "Tour ended: "+fmtTime(t.endTime),
+    "Duration: "+duration(t.startTime,t.endTime),"",
+    "Packets delivered: "+t.delivered,
+    "Packets returned: "+(t.returned ?? 0),"",
+    t.lastLat ? "Last GPS: "+t.lastLat.toFixed(5)+", "+t.lastLng.toFixed(5) : "GPS: not available",
+    t.lastLat ? "Map: https://maps.google.com/?q="+t.lastLat+","+t.lastLng : ""
+  ].join("\n");
+}
+function mailtoFor(t){
+  return "mailto:"+encodeURIComponent(dispatchEmail||"")
+    +"?subject="+encodeURIComponent("Tour report — "+t.driver+" — "+fmtDate(t.startTime))
+    +"&body="+encodeURIComponent(report(t));
+}
+
+/* ------------ database ------------ */
+function saveTour(t){ if(db && t) db.ref("tours/"+t.id).set(t); }
+function listenAll(){
+  if(!db) return;
+  db.ref("tours").on("value", snap => { allTours = snap.val() || {}; if(tab==="dash") render(); });
+  db.ref("config/email").on("value", snap => {
+    dispatchEmail = snap.val() || "";
+    const el = $("cfg-email"); if(el && document.activeElement!==el) el.value = dispatchEmail;
+  });
+}
+listenAll();
+
+/* ------------ GPS ------------ */
+function startGps(){
+  if(!navigator.geolocation){ gpsStatus="denied"; return; }
+  watchId = navigator.geolocation.watchPosition(
+    p => { lastPos = {lat:p.coords.latitude, lng:p.coords.longitude, at:new Date().toISOString()};
+           if(gpsStatus!=="on"){ gpsStatus="on"; renderStatusOnly(); } },
+    () => { gpsStatus="denied"; renderStatusOnly(); },
+    { enableHighAccuracy:true, maximumAge:15000, timeout:20000 }
+  );
+  pushTimer = setInterval(pushPos, 45000);
+}
+function stopGps(){
+  if(watchId!=null){ navigator.geolocation.clearWatch(watchId); watchId=null; }
+  if(pushTimer){ clearInterval(pushTimer); pushTimer=null; }
+  gpsStatus="off";
+}
+function pushPos(){
+  if(!tour || !lastPos) return;
+  tour.lastLat=lastPos.lat; tour.lastLng=lastPos.lng; tour.lastGpsAt=lastPos.at;
+  tour.trail=(tour.trail||[]).concat([lastPos]).slice(-50);
+  tour.updatedAt=new Date().toISOString();
+  saveTour(tour);
+}
+
+/* ------------ driver actions ------------ */
+async function startTour(){
+  const name = $("drv-name").value.trim();
+  if(!name) return;
+  if(db){ /* resume if this driver already has an active tour */
+    const snap = await db.ref("tours").orderByChild("status").equalTo("active").get();
+    const list = snap.val()||{};
+    const existing = Object.values(list).find(t => t.driver.toLowerCase()===name.toLowerCase());
+    if(existing){ tour=existing; phase="active"; startGps(); render(); return; }
+  }
+  const now = new Date();
+  tour = { id: now.getTime()+"_"+slug(name), driver:name, startTime:now.toISOString(),
+           endTime:null, delivered:0, returned:null, status:"active", trail:[], updatedAt:now.toISOString() };
+  saveTour(tour); phase="active"; startGps(); render();
+}
+function bump(d){
+  if(!tour) return;
+  tour.delivered=Math.max(0,tour.delivered+d);
+  if(lastPos){ tour.lastLat=lastPos.lat; tour.lastLng=lastPos.lng; tour.lastGpsAt=lastPos.at; }
+  tour.updatedAt=new Date().toISOString();
+  saveTour(tour); render();
+}
+function finishTour(){
+  const r=parseInt($("ret-input").value,10);
+  tour.returned=Number.isFinite(r)?r:0;
+  tour.endTime=new Date().toISOString();
+  tour.status="finished"; tour.updatedAt=tour.endTime;
+  saveTour(tour); stopGps(); phase="done"; render();
+}
+function resetDriver(){ tour=null; phase="login"; stopGps(); render(); }
+function saveEmail(){ const v=$("cfg-email").value.trim(); dispatchEmail=v; if(db) db.ref("config/email").set(v); render(); }
+
+/* ------------ rendering ------------ */
+function setTab(t){ tab=t; $("tab-driver").classList.toggle("on",t==="driver"); $("tab-dash").classList.toggle("on",t==="dash"); render(); }
+function renderStatusOnly(){ const el=$("gps-el"); if(el) el.outerHTML=gpsHtml(); }
+function gpsHtml(){
+  const cls = gpsStatus==="on"?"status-live":"status-bad";
+  const txt = gpsStatus==="on"?"live":(gpsStatus==="denied"?"blocked":"starting…");
+  return '<span id="gps-el" class="'+cls+'">'+txt+'</span>';
+}
+function trailSvg(trail){
+  if(!trail || trail.length<2) return "";
+  const lats=trail.map(p=>p.lat), lngs=trail.map(p=>p.lng);
+  const mla=Math.min(...lats), Mla=Math.max(...lats), mlo=Math.min(...lngs), Mlo=Math.max(...lngs);
+  const W=260,H=90,P=8;
+  const sx=lo=>P+((lo-mlo)/((Mlo-mlo)||1))*(W-2*P), sy=la=>H-P-((la-mla)/((Mla-mla)||1))*(H-2*P);
+  const d=trail.map((p,i)=>(i?"L":"M")+sx(p.lng).toFixed(1)+","+sy(p.lat).toFixed(1)).join(" ");
+  const l=trail[trail.length-1];
+  return '<svg width="'+W+'" height="'+H+'" style="background:#F4F6F8;border-radius:8px;border:1px solid var(--line)">'
+    +'<path d="'+d+'" fill="none" stroke="var(--gray)" stroke-width="2" stroke-linecap="round"/>'
+    +'<circle cx="'+sx(l.lng)+'" cy="'+sy(l.lat)+'" r="5" fill="var(--amber)" stroke="var(--ink)" stroke-width="1.5"/></svg>';
+}
+
+function render(){
+  const v = $("view");
+  if(tab==="driver"){ v.innerHTML = renderDriver(); return; }
+  v.innerHTML = renderDash();
+}
+
+function renderDriver(){
+  if(phase==="login") return `
+    <div class="card">
+      <div class="eyebrow">Driver check-in</div>
+      <h2 class="display">Start your tour</h2>
+      <p class="muted">Enter your name and press start. Your start time is recorded automatically and your position is shared with dispatch while the tour is running.</p>
+      <input id="drv-name" placeholder="Your name" style="margin-bottom:14px" />
+      <button class="bigbtn" style="background:var(--green)" onclick="startTour()">
+        <div class="l">Start tour</div><div class="s">Records start time · enables GPS</div>
+      </button>
+    </div>`;
+
+  if(phase==="active") return `
+    <div class="card">
+      <div class="tourhead">
+        <div><div class="eyebrow">On tour</div><div class="display" style="font-size:26px;font-weight:700">${esc(tour.driver)}</div></div>
+        <div class="muted" style="text-align:right">Started ${fmtTime(tour.startTime)}<br>${duration(tour.startTime)} on the road<br>GPS: ${gpsHtml()}</div>
+      </div>
+    </div>
+    <button class="stamp" onclick="bump(1)" aria-label="Mark one packet delivered">
+      <div class="n">${tour.delivered}</div><div class="t">Delivered · tap +1</div>
+    </button>
+    <button class="linkbtn" onclick="bump(-1)">Undo last delivery</button>
+    <button class="bigbtn" style="background:var(--ink)" onclick="phase='finish';render()">
+      <div class="l">Finish tour</div><div class="s">Enter returned packets and record end time</div>
+    </button>`;
+
+  if(phase==="finish") return `
+    <div class="card">
+      <div class="eyebrow">Finish tour</div>
+      <h2 class="display">Returned packets</h2>
+      <p class="muted">You delivered <b style="color:var(--ink)">${tour.delivered}</b> packets. How many are you bringing back?</p>
+      <input id="ret-input" type="number" min="0" inputmode="numeric" placeholder="0" style="font-size:24px;text-align:center;margin-bottom:14px" />
+      <div class="row">
+        <button class="ghost" onclick="phase='active';render()">Back</button>
+        <button class="bigbtn" style="flex:2;background:var(--red)" onclick="finishTour()">
+          <div class="l">End tour</div><div class="s">Records end time</div>
+        </button>
+      </div>
+    </div>`;
+
+  return `
+    <div class="card">
+      <div class="eyebrow">Tour complete</div>
+      <h2 class="display">Nice work, ${esc(tour.driver)}</h2>
+      <table><tbody>
+        <tr><td>Start</td><td>${fmtTime(tour.startTime)}</td></tr>
+        <tr><td>End</td><td>${fmtTime(tour.endTime)}</td></tr>
+        <tr><td>Duration</td><td>${duration(tour.startTime,tour.endTime)}</td></tr>
+        <tr><td>Delivered</td><td>${tour.delivered}</td></tr>
+        <tr><td>Returned</td><td>${tour.returned??0}</td></tr>
+      </tbody></table>
+      <a href="${mailtoFor(tour)}" style="text-decoration:none">
+        <button class="bigbtn" style="background:var(--green)">
+          <div class="l">Send report by email</div>
+          <div class="s">${dispatchEmail ? "Opens your mail app → "+esc(dispatchEmail) : "Opens your mail app (dispatch email not set yet)"}</div>
+        </button>
+      </a>
+      <button class="ghost" style="width:100%;margin-top:12px" onclick="resetDriver()">Done — back to check-in</button>
+    </div>`;
+}
+
+function renderDash(){
+  const tours = Object.values(allTours).sort((a,b)=>(b.startTime||"").localeCompare(a.startTime||""));
+  const active = tours.filter(t=>t.status==="active");
+  const finished = tours.filter(t=>t.status==="finished");
+  const row = t => {
+    const stale = t.lastGpsAt && (Date.now()-new Date(t.lastGpsAt) > 5*60000);
+    return `<div class="card">
+      <div class="tourhead">
+        <div>
+          <div class="display" style="font-size:22px;font-weight:700">${esc(t.driver)}
+            <span style="font-size:13px;letter-spacing:.08em" class="${t.status==="active"?"status-live":"muted"}">${t.status==="active"?"● on tour":"finished"}</span>
+          </div>
+          <div class="muted">${fmtDate(t.startTime)} · ${fmtTime(t.startTime)} → ${fmtTime(t.endTime)} · ${duration(t.startTime,t.endTime)}</div>
+          <div style="font-size:15px;margin-top:6px">Delivered <b>${t.delivered}</b>${t.returned!=null?` · Returned <b>${t.returned}</b>`:""}</div>
+          ${t.lastLat!=null
+            ? `<div style="font-size:13px;margin-top:6px"><a href="https://maps.google.com/?q=${t.lastLat},${t.lastLng}" target="_blank"><b>Open position in Google Maps ↗</b></a>
+               <span class="${stale?'status-bad':'muted'}">· GPS ${fmtTime(t.lastGpsAt)}${stale?" (stale)":""}</span></div>`
+            : `<div class="muted" style="margin-top:6px">No GPS signal received yet.</div>`}
+          ${t.status==="finished" ? `<a href="${mailtoFor(t)}" style="display:inline-block;margin-top:8px;font-weight:600;color:var(--green)">Email this report ↗</a>`:""}
+        </div>
+        ${trailSvg(t.trail)}
+      </div>
+    </div>`;
+  };
+  return `
+    <div class="card">
+      <div class="eyebrow">Dispatch settings</div>
+      <div class="row" style="margin-top:8px;flex-wrap:wrap">
+        <input id="cfg-email" value="${esc(dispatchEmail)}" placeholder="Reports email, e.g. dispatch@company.com" style="flex:1 1 220px;padding:10px 12px;font-size:14px" />
+        <button class="ghost" style="flex:0;background:var(--ink);color:#fff;border:none;font-weight:600" onclick="saveEmail()">Save</button>
+      </div>
+      <div class="muted" style="font-size:12px;margin-top:8px">Updates live — no refresh needed. Driver reports open in the mail app addressed to this email.</div>
+    </div>
+    <div class="eyebrow">Active tours (${active.length})</div>
+    <div style="margin:8px 0 18px">${active.length?active.map(row).join(""):'<div class="muted">No drivers on the road right now.</div>'}</div>
+    <div class="eyebrow">Finished tours (${finished.length})</div>
+    <div style="margin-top:8px">${finished.length?finished.map(row).join(""):'<div class="muted">No finished tours yet.</div>'}</div>`;
+}
+
+render();
+</script>
+</body>
+</html>
