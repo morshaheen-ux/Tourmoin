@@ -107,7 +107,7 @@ const firebaseConfig = {
 const ADMIN_USERS = ["amdin", "admin"];
 const ADMIN_PASSWORD = "MH_32rdtg4sda";
 /* ===================================================================== */
-const APP_VERSION = "v5";
+const APP_VERSION = "v7";
 
 const configured = !firebaseConfig.apiKey.startsWith("PASTE");
 let db = null;
@@ -146,7 +146,7 @@ function report(t){
     "Driver: "+t.driver, "Date: "+fmtDate(t.startTime),
     "Tour started: "+fmtTime(t.startTime), "Tour ended: "+fmtTime(t.endTime),
     "Duration: "+duration(t.startTime,t.endTime), "",
-    "Packets delivered: "+t.delivered, "Packets returned: "+(t.returned ?? 0), "",
+    "Packets received: "+(t.received ?? "—"), "Packets delivered: "+t.delivered, "Packets returned: "+(t.returned ?? 0), "",
     t.lastLat ? "Last GPS: "+t.lastLat.toFixed(5)+", "+t.lastLng.toFixed(5) : "GPS: not available",
     t.lastLat ? "Map: https://maps.google.com/?q="+t.lastLat+","+t.lastLng : ""
   ].join("\n");
@@ -218,7 +218,9 @@ function pushPos(){
 /* ------------ driver actions ------------ */
 async function startTour(){
   const name = $("drv-name").value.trim();
-  if(!name) return;
+  const received = parseInt($("drv-packets").value, 10);
+  if(!name){ $("drv-name").focus(); return; }
+  if(!Number.isFinite(received) || received < 1){ $("drv-packets").focus(); return; }
   if(db){
     try{
       const snap = await db.ref("tours").get();
@@ -228,12 +230,13 @@ async function startTour(){
   }
   const now = new Date();
   tour = { id: now.getTime()+"_"+slug(name), driver:name, startTime:now.toISOString(),
-           delivered:0, status:"active", trail:[], updatedAt:now.toISOString() };
+           received:received, delivered:0, status:"active", trail:[], updatedAt:now.toISOString() };
   saveTour(tour); phase="active"; render(); startGps();
 }
+const remaining = t => Math.max(0, (t.received ?? 0) - (t.delivered ?? 0));
 function bump(d){
   if(!tour) return;
-  tour.delivered = Math.max(0, tour.delivered+d);
+  tour.delivered = Math.min(tour.received ?? Infinity, Math.max(0, tour.delivered + d));
   if(lastPos){ tour.lastLat=lastPos.lat; tour.lastLng=lastPos.lng; tour.lastGpsAt=lastPos.at; tour.lastAcc=lastPos.acc; lastSentAt=Date.now(); }
   tour.updatedAt = new Date().toISOString();
   saveTour(tour); render();
@@ -257,6 +260,75 @@ function tryLogin(){
 function logout(){ adminAuthed = false; destroyMap(); render(); }
 function saveEmail(){ const v=$("cfg-email").value.trim(); dispatchEmail=v; if(db) db.ref("config/email").set(v); }
 
+/* ------------ system check (diagnostics) ------------ */
+function diagLine(ok, label, detail){
+  return '<div style="margin:4px 0"><b style="color:'+(ok===true?'var(--green)':ok===false?'var(--red)':'var(--amber-dark)')+'">'
+    +(ok===true?'✔':ok===false?'✘':'…')+'</b> <b>'+label+'</b>'+(detail?(' — '+detail):'')+'</div>';
+}
+async function runDiag(){
+  const box = $("diag-box");
+  box.style.display = "block";
+  let out = "";
+  const paint = () => { box.innerHTML = out + '<div class="muted" style="margin-top:6px">Send a photo of this box to your admin/support if something is red.</div>'; };
+
+  /* 1. Secure connection (GPS only works on https) */
+  out += diagLine(window.isSecureContext, "Secure connection (HTTPS)",
+    window.isSecureContext ? "OK" : "GPS is blocked on insecure pages. Open the site via its https:// address, not as a local file.");
+  paint();
+
+  /* 2. Firebase config pasted */
+  out += diagLine(configured, "Firebase configured",
+    configured ? "config found" : "The firebaseConfig in index.html still has PASTE_YOUR… placeholders. Nothing can be saved or shared until it is filled in.");
+  paint();
+
+  /* 3. Firebase database reachable + writable */
+  if(configured && db){
+    out += diagLine(null, "Database connection", "testing…"); paint();
+    try{
+      const ref = db.ref("diag/ping");
+      await ref.set(new Date().toISOString());
+      const snap = await ref.get();
+      out = out.replace(diagLine(null, "Database connection", "testing…"),
+        diagLine(!!snap.val(), "Database connection", snap.val() ? "write + read OK" : "write went through but read failed"));
+    }catch(e){
+      const msg = String(e && e.message || e);
+      const hint = msg.toUpperCase().includes("PERMISSION")
+        ? "PERMISSION DENIED — your Firebase test-mode rules have probably expired (they auto-expire after 30 days). Fix: Firebase console → Realtime Database → Rules → set read and write to true → Publish."
+        : msg + " — check that databaseURL in the config is correct and that a Realtime Database was created.";
+      out = out.replace(diagLine(null, "Database connection", "testing…"), diagLine(false, "Database connection", hint));
+    }
+    paint();
+  }
+
+  /* 4. Location permission + live fix */
+  if(!navigator.geolocation){
+    out += diagLine(false, "GPS supported", "This browser has no location support."); paint();
+  } else {
+    out += diagLine(true, "GPS supported", ""); paint();
+    try{
+      if(navigator.permissions && navigator.permissions.query){
+        const st = await navigator.permissions.query({ name:"geolocation" });
+        out += diagLine(st.state!=="denied", "Location permission", st.state==="granted" ? "granted"
+          : st.state==="denied" ? "DENIED — enable location for this website in your phone/browser settings, then reload."
+          : "will be asked when needed");
+        paint();
+      }
+    }catch(e){}
+    out += diagLine(null, "Live GPS fix", "waiting up to 25 s — go near a window or outside…"); paint();
+    await new Promise(res => {
+      navigator.geolocation.getCurrentPosition(
+        p => { out = out.replace(diagLine(null,"Live GPS fix","waiting up to 25 s — go near a window or outside…"),
+                 diagLine(true, "Live GPS fix", p.coords.latitude.toFixed(5)+", "+p.coords.longitude.toFixed(5)+" (±"+Math.round(p.coords.accuracy)+" m)")); paint(); res(); },
+        e => { const why = e.code===1 ? "PERMISSION DENIED — you (or the phone) blocked location for this site."
+                 : e.code===2 ? "POSITION UNAVAILABLE — no GPS signal; desktop computers often have none. Test on a phone, outdoors."
+                 : "TIMED OUT — no fix within 25 s. Test on a phone with a clear sky view.";
+               out = out.replace(diagLine(null,"Live GPS fix","waiting up to 25 s — go near a window or outside…"),
+                 diagLine(false, "Live GPS fix", why)); paint(); res(); },
+        { enableHighAccuracy:true, timeout:25000, maximumAge:0 });
+    });
+  }
+}
+
 /* ------------ map ------------ */
 function destroyMap(){ if(map){ map.remove(); map=null; markers={}; } }
 function initMap(){
@@ -278,8 +350,8 @@ function updateMarkers(){
     seen[t.id] = true;
     pts.push([t.lastLat, t.lastLng]);
     const stale = t.lastGpsAt && (Date.now()-new Date(t.lastGpsAt) > 5*60000);
-    const label = esc(t.driver)+" · "+t.delivered+" delivered";
-    const popup = "<b>"+esc(t.driver)+"</b><br>Delivered: "+t.delivered
+    const label = esc(t.driver)+" · "+t.delivered+" done · "+remaining(t)+" left";
+    const popup = "<b>"+esc(t.driver)+"</b><br>Delivered: "+t.delivered+" of "+(t.received ?? "?")
       +"<br>Started: "+fmtTime(t.startTime)
       +"<br>GPS: "+fmtTime(t.lastGpsAt)+(stale?" (stale)":"")+(t.lastAcc?(" · ±"+t.lastAcc+" m"):"")
       +'<br><a href="https://maps.google.com/?q='+t.lastLat+','+t.lastLng+'" target="_blank">Open in Google Maps</a>';
@@ -370,14 +442,20 @@ function renderDriver(){
     <div class="card">
       <div class="eyebrow">Driver check-in</div>
       <h2 class="display">Start your tour</h2>
-      <p class="muted">Enter your name and press start. Your start time is recorded automatically and your position is shared with dispatch while the tour is running.</p>
-      <input id="drv-name" placeholder="Your name" style="margin-bottom:14px" onkeydown="if(event.key==='Enter')startTour()" />
+      <p class="muted">Enter your name and how many packets you received. Your start time is recorded automatically and your position is shared with dispatch while the tour is running.</p>
+      <input id="drv-name" placeholder="Your name" style="margin-bottom:10px" />
+      <input id="drv-packets" type="number" min="1" inputmode="numeric" placeholder="Packets received (e.g. 120)"
+        style="margin-bottom:14px" onkeydown="if(event.key==='Enter')startTour()" />
       <button class="bigbtn" style="background:var(--green)" onclick="startTour()">
         <div class="l">Start tour</div><div class="s">Records start time · enables GPS</div>
       </button>
+      <button class="linkbtn" onclick="runDiag()">Something not working? Run system check</button>
+      <div id="diag-box" class="gpsbox" style="display:none"></div>
     </div>`;
 
-  if(phase==="active") return `
+  if(phase==="active"){
+    const left = remaining(tour);
+    return `
     <div class="card">
       <div class="tourhead">
         <div><div class="eyebrow">On tour</div><div class="display" style="font-size:26px;font-weight:700">${esc(tour.driver)}</div></div>
@@ -385,20 +463,26 @@ function renderDriver(){
       </div>
       <div id="gps-box" class="gpsbox">${gpsBoxHtml()}</div>
     </div>
-    <button class="stamp" onclick="bump(1)" aria-label="Mark one packet delivered">
-      <div class="n">${tour.delivered}</div><div class="t">Delivered · tap +1</div>
+    <button class="stamp" onclick="bump(1)" aria-label="Mark one packet delivered" ${left===0?'style="opacity:.55"':''}>
+      <div class="n">${left}</div><div class="t">${left===0?"All delivered!":"Packets left · tap −1"}</div>
     </button>
+    <div class="muted" style="text-align:center;font-size:15px">Delivered <b style="color:var(--ink)">${tour.delivered}</b> of <b style="color:var(--ink)">${tour.received}</b></div>
     <button class="linkbtn" onclick="bump(-1)">Undo last delivery</button>
     <button class="bigbtn" style="background:var(--ink)" onclick="phase='finish';render()">
-      <div class="l">Finish tour</div><div class="s">Enter returned packets and record end time</div>
+      <div class="l">Finish tour</div><div class="s">Records end time</div>
     </button>`;
+  }
 
-  if(phase==="finish") return `
+  if(phase==="finish"){
+    const left = remaining(tour);
+    return `
     <div class="card">
       <div class="eyebrow">Finish tour</div>
-      <h2 class="display">Returned packets</h2>
-      <p class="muted">You delivered <b style="color:var(--ink)">${tour.delivered}</b> packets. How many are you bringing back?</p>
-      <input id="ret-input" type="number" min="0" inputmode="numeric" placeholder="0" style="font-size:24px;text-align:center;margin-bottom:14px" />
+      <h2 class="display">Confirm &amp; end</h2>
+      <p class="muted">You received <b style="color:var(--ink)">${tour.received}</b> and delivered <b style="color:var(--ink)">${tour.delivered}</b>.
+      Packets you're bringing back (you can correct it):</p>
+      <input id="ret-input" type="number" min="0" inputmode="numeric" value="${left}"
+        style="font-size:24px;text-align:center;margin-bottom:14px" />
       <div class="row">
         <button class="ghost" onclick="phase='active';render()">Back</button>
         <button class="bigbtn" style="flex:2;background:var(--red)" onclick="finishTour()">
@@ -406,6 +490,7 @@ function renderDriver(){
         </button>
       </div>
     </div>`;
+  }
 
   return `
     <div class="card">
@@ -415,6 +500,7 @@ function renderDriver(){
         <tr><td>Start</td><td>${fmtTime(tour.startTime)}</td></tr>
         <tr><td>End</td><td>${fmtTime(tour.endTime)}</td></tr>
         <tr><td>Duration</td><td>${duration(tour.startTime,tour.endTime)}</td></tr>
+        <tr><td>Received</td><td>${tour.received ?? "—"}</td></tr>
         <tr><td>Delivered</td><td>${tour.delivered}</td></tr>
         <tr><td>Returned</td><td>${tour.returned??0}</td></tr>
       </tbody></table>
@@ -470,7 +556,8 @@ function updateAdminData(){
         <span>Started</span><b>${fmtTime(t.startTime)} (${fmtDate(t.startTime)})</b>
         <span>Finished</span><b>${t.endTime?fmtTime(t.endTime):"— still driving"}</b>
         <span>Duration</span><b>${duration(t.startTime,t.endTime)}</b>
-        <span>Delivered</span><b>${t.delivered} packets</b>
+        <span>Received</span><b>${t.received ?? "—"} packets</b>
+        <span>Delivered</span><b>${t.delivered} packets${t.received?` (${remaining(t)} left)`:""}</b>
         <span>Returned</span><b>${t.returned!=null?t.returned+" packets":"—"}</b>
         <span>Location</span><span>${loc}</span>
       </div>
